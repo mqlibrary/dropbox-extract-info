@@ -6,6 +6,16 @@ import json
 import csv
 import config
 
+# load configuration items from config.py
+DROPBOX_API = config.DROPBOX_API
+DROPBOX_KEY = config.DROPBOX_KEY
+DROPBOX_MID = config.DROPBOX_MID
+ES_BASE = config.ES_BASE
+ES_USER = config.ES_USER
+ES_PASS = config.ES_PASS
+ES_INDX = config.ES_INDX
+
+
 # configure logging
 log = logging.getLogger('dropbox-info')
 log.setLevel(logging.DEBUG)
@@ -17,13 +27,6 @@ ch.setLevel(logging.INFO)
 
 log.addHandler(ch)
 
-DROPBOX_API = config.DROPBOX_API
-DROPBOX_KEY = config.DROPBOX_KEY
-DROPBOX_MID = config.DROPBOX_MID
-ES_BASE = config.ES_BASE
-ES_USER = config.ES_USER
-ES_PASS = config.ES_PASS
-ES_INDX = config.ES_INDX
 
 # create an elasticsearch client
 log.debug("setting up elasticsearch client")
@@ -150,18 +153,23 @@ def process_team_folder(team_folder):
 if __name__ == "__main__":
     log.info("processing starting: {}".format(datetime.datetime.now()))
 
+    # fetch all the top level folders
     cursor = None
     complete = False
     while not complete:
         team_folders, cursor = dropbox_fetch_team_folders(cursor)
         complete = cursor is None
 
+    # process all the top level folders in parallel.
+    # this deep gets all child files and folders
     pool = Pool(processes=8)
     data = pool.map(process_team_folder, team_folders)
     pool.close()
 
+    # combine the results of each of the top level folders
     file_data = [file for files in data for file in files]
 
+    # save as csv as well
     csv_save_files(file_data)
 
     log.info("processing complete: {}".format(datetime.datetime.now()))
