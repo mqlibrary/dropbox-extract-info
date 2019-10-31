@@ -4,6 +4,7 @@ import requests
 import logging
 import json
 import csv
+import sys
 import config
 
 # load configuration items from config.py
@@ -14,7 +15,6 @@ ES_BASE = config.ES_BASE
 ES_USER = config.ES_USER
 ES_PASS = config.ES_PASS
 ES_INDX = config.ES_INDX
-
 
 # configure logging
 log = logging.getLogger('dropbox-info')
@@ -31,6 +31,8 @@ log.addHandler(ch)
 # create an elasticsearch client
 log.debug("setting up elasticsearch client")
 elastic = requests.Session()
+if "--proxies" in sys.argv:
+    elastic.proxies = {"http": "http://127.0.0.1:8888", "https": "http://127.0.0.1:8888"}
 elastic.auth = (ES_USER, ES_PASS)
 elastic.headers.update({"Accept": "application/json", "Content-Type": "application/json"})
 elastic.verify = False
@@ -38,6 +40,8 @@ elastic.verify = False
 # create a dropbox client
 log.debug("setting up dropbox client")
 dropbox = requests.Session()
+if "--proxies" in sys.argv:
+    dropbox.proxies = {"http": "http://127.0.0.1:8888", "https": "http://127.0.0.1:8888"}
 dropbox.headers.update({"Accept": "application/json",
                         "Content-Type": "application/json",
                         "Authorization": "Bearer " + DROPBOX_KEY})
@@ -102,8 +106,11 @@ def elastic_save_files(files):
     """function to save a batch of file metadata to elasticsearch"""
     bulk = ""
     for file in files:
-        meta = {"index": {"_index": ES_INDX, "_type": "item", "_id": file["id"]}}
-        bulk += json.dumps(meta) + "\n" + json.dumps(file) + "\n"
+        if "id" in file:
+            meta = {"index": {"_index": ES_INDX, "_type": "item", "_id": file["id"]}}
+            bulk += json.dumps(meta) + "\n" + json.dumps(file) + "\n"
+        else:
+            log.error("file missing 'id': %s", file)
 
     log.debug("saving files: {}".format(len(files)))
     response = elastic.post(ES_BASE + "/_bulk", data=bulk)
