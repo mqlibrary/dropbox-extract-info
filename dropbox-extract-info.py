@@ -65,7 +65,7 @@ def dropbox_fetch_team_folders(cursor=None):
     return team_folders, cursor
 
 
-def dropbox_fetch_files(team_folder, cursor=None):
+def dropbox_fetch_files(team_folder, start_time, cursor=None):
     """function to fetch all files in the team_folder provided - recursively"""
     team_folder_payload = '{".tag": "namespace_id", "namespace_id": "' + team_folder["team_folder_id"] + '"}'
     if cursor is None:
@@ -94,6 +94,10 @@ def dropbox_fetch_files(team_folder, cursor=None):
         item["path_display"] = team_folder["name"] + item["path_display"]
         item["path_lower"] = team_folder["name"].lower() + item["path_lower"]
         item["base_folder"] = team_folder["name"]
+        item["level"] = item["path_lower"].count('/')
+        item["parent"] = item["path_lower"][:item["path_lower"].rfind('/')]
+        item["state"] = "active"
+        item["last_indexed_time"] = start_time.strftime("%Y%m%d%H%M%S")
         del item[".tag"]
         files.append(item)
 
@@ -102,13 +106,29 @@ def dropbox_fetch_files(team_folder, cursor=None):
     return files, cursor
 
 
+def elastic_fetch_file_ids():
+    """Function to get a list of all file ids on elasticsearch"""
+    ids = []
+    response = elastic.get(f"{ES_BASE}/{ES_INDX}/_doc/_search?q=*:*&_source=false&size=10000&sort=_doc&scroll=1m")
+    data = response.json()
+    scroll_id = data["_scroll_id"]
+    while len(data["hits"]["hits"]) > 0:
+        for hit in data["hits"]["hits"]:
+            ids.append(hit["_id"])
+        response = elastic.get(f"{ES_BASE}/_search/scroll?scroll=1m&scroll_id={scroll_id}")
+        data = response.json()
+
+    return ids
+
+
 def elastic_save_files(files):
     """function to save a batch of file metadata to elasticsearch"""
     bulk = ""
     for file in files:
         if "id" in file:
-            meta = {"index": {"_index": ES_INDX, "_type": "item", "_id": file["id"]}}
-            bulk += json.dumps(meta) + "\n" + json.dumps(file) + "\n"
+            meta = {"update": {"_index": ES_INDX, "_id": file["id"], "_source": True}}
+            bulk += json.dumps(meta) + "\n"
+            bulk += '{ "doc": ' + json.dumps(file) + ', "doc_as_upsert": true }\n'
         else:
             log.error("file missing 'id': %s", file)
 
@@ -117,6 +137,21 @@ def elastic_save_files(files):
     log.debug("response text: {} {}".format(response.status_code, response.reason))
 
     return len(files)
+
+
+def elastic_mark_deleted(file_ids):
+    """function to save a batch of file metadata to elasticsearch"""
+    data = '{ "doc": { "state": "deleted" }, "doc_as_upsert": true }'
+    bulk = ""
+    for id in file_ids:
+        meta = {"update": {"_index": ES_INDX, "_id": id, "_source": True}}
+        bulk += json.dumps(meta) + "\n" + data + "\n"
+
+    log.debug("marking deleted files: {}".format(len(file_ids)))
+    response = elastic.post(ES_BASE + "/_bulk", data=bulk)
+    log.debug("response text: {} {}".format(response.status_code, response.reason))
+
+    return len(file_ids)
 
 
 def csv_save_files(file_data, filename="dropbox-data.txt"):
@@ -140,7 +175,7 @@ def csv_save_files(file_data, filename="dropbox-data.txt"):
                               item["tag"]])
 
 
-def process_team_folder(team_folder):
+def process_team_folder(team_folder, start_time):
     """function to process a team folder"""
     log.info("[{}] processing team folder".format(team_folder["name"]))
     file_data = []
@@ -148,7 +183,7 @@ def process_team_folder(team_folder):
     cursor = None
     complete = False
     while not complete:
-        files, cursor = dropbox_fetch_files(team_folder, cursor)
+        files, cursor = dropbox_fetch_files(team_folder, start_time, cursor)
         file_data += files
         total_saved += elastic_save_files(files)
         log.info("[{}] fetched: {}, saved: {}".format(team_folder["name"], len(file_data), total_saved))
@@ -158,7 +193,9 @@ def process_team_folder(team_folder):
 
 
 if __name__ == "__main__":
-    log.info("processing starting: {}".format(datetime.datetime.now()))
+    start_time = datetime.datetime.now()
+
+    log.info("processing starting: {}".format(start_time))
 
     # fetch all the top level folders
     cursor = None
@@ -170,13 +207,24 @@ if __name__ == "__main__":
     # process all the top level folders in parallel.
     # this deep gets all child files and folders
     pool = Pool(processes=8)
-    data = pool.map(process_team_folder, team_folders)
+    data = pool.starmap(process_team_folder, [(tf, start_time) for tf in team_folders])
     pool.close()
 
     # combine the results of each of the top level folders
-    file_data = [file for files in data for file in files]
+    file_data = [f for files in data for f in files]
+
+    log.info("fetching elasticsearch files")
+    current_file_ids = elastic_fetch_file_ids()
+
+    log.info("identifying deleted files")
+    deleted_file_ids = set(current_file_ids) - set([f["id"] for f in file_data if "id" in f])
+    log.info("deleted files: %s", len(deleted_file_ids))
+
+    log.info("marking files as deleted")
+    elastic_mark_deleted(deleted_file_ids)
 
     # save as csv as well
+    log.info("saving csv file")
     csv_save_files(file_data)
 
     log.info("processing complete: {}".format(datetime.datetime.now()))
