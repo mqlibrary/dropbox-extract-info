@@ -200,8 +200,10 @@ if __name__ == "__main__":
     # fetch all the top level folders
     cursor = None
     complete = False
+    team_folders = []
     while not complete:
-        team_folders, cursor = dropbox_fetch_team_folders(cursor)
+        folders, cursor = dropbox_fetch_team_folders(cursor)
+        team_folders.extend(folders)
         complete = cursor is None
 
     # process all the top level folders in parallel.
